@@ -1,7 +1,7 @@
 // Cron tick：遍历已启用的 pair，重算 impulse，命中则实时调 AI 生成主动消息 → outbox + 推送。
 // worker.js 的 scheduled 和 server.js 的 node-cron 都调 runProactiveTick(env)。
 
-import { createProactiveStore, BACKEND_FIRE_COOLDOWN_MS } from '../store/proactiveStore.js';
+import { createProactiveStore, BACKEND_FIRE_COOLDOWN_MS, PROACTIVE_WINDOW_CAP } from '../store/proactiveStore.js';
 import { createOutboxStore } from '../store/outboxStore.js';
 import { createSubStore } from '../store/subStore.js';
 import { shouldFire, shouldFireInterval } from './impulseEngine.js';
@@ -119,11 +119,35 @@ export async function runProactiveTick(env) {
             };
             await outbox.put(rec.inboxId, item);
 
+            // 🔑 把 char 自己刚发的消息追加进后端滑窗，否则 user 一直不回复时，下次 tick 用的
+            //    还是同一份旧上下文 → AI 看不到自己发过什么 → 反复说类似的话 = 重复消息。
+            //    手机端排水后会异步 sync 覆盖这份（带完整字段），这里只是保证「自己发的」立刻进上下文。
+            //    用 extractPushBodies 拆成每个气泡一条（与推送/手机端入库口径一致，过滤隐藏类型）。
+            let nextWindow = Array.isArray(rec.recentMessages) ? rec.recentMessages : [];
+            if (!error && content) {
+                const selfBubbles = extractPushBodies(content)
+                    .filter(b => b && b !== '有新消息' && b !== '有新消息，点开查看')
+                    .map(text => ({ sender: 'char', text }));
+                if (selfBubbles.length) {
+                    nextWindow = [...nextWindow, ...selfBubbles].slice(-PROACTIVE_WINDOW_CAP);
+                }
+            }
+
             // 简单更新后端 lifeState（完整 evolve 仍在手机端，下次 sync 覆盖）
             const ls = rec.lifeState || {};
+            // 📈 自增「连续未回复」：后端自己发了一条而 user 没回（user 回了的话手机端 sync 会把
+            //    streak 清 0 并覆盖整份 lifeState）。streak 是真人模式防轰炸的核心闸门
+            //    （>=streakHardCap 硬跳过 + 每级降低 impulse 分），后端不自增 → 闸门永远失效 →
+            //    user 一直不回时反复主动 = 重复消息。仅 impulse 模式自增（interval 模式不看 streak）。
+            const prevStreak = (ls.unansweredStreak || 0);
+            const nextStreak = (rec.mode === 'interval' || error) ? prevStreak : prevStreak + 1;
             await proactive.patch(rec.inboxId, rec.userId, rec.charId, {
                 lastFiredAt: now,
-                lifeState: { ...ls, lastImpulseAt: now, lastProactiveSentAt: now },
+                lifeState: { ...ls, lastImpulseAt: now, lastProactiveSentAt: now, unansweredStreak: nextStreak },
+                recentMessages: nextWindow,
+                // 🕒 自己刚发完 → lastInteractionAt 也推进到现在，否则「距上次多久」一直从旧时间算，
+                //    下次 tick 会以为隔了很久（其实自己刚发过）→ 误触发频繁主动 / since 文本失真。
+                lastInteractionAt: now,
             });
 
             // 发推送叫醒——像微信那样【逐条气泡分开弹 + 带消息内容 + 角色名标题】，
