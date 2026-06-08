@@ -13,7 +13,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { requireSecret } from './util/auth.js';
 import { createOutboxStore } from './store/outboxStore.js';
-import { createSubStore } from './store/subStore.js';
+import { createSubStore, subKey } from './store/subStore.js';
 import { createProactiveStore, PROACTIVE_WINDOW_CAP } from './store/proactiveStore.js';
 import { runGeneration } from './ai/aiCaller.js';
 import { dispatchPush } from './push/pushSender.js';
@@ -211,6 +211,12 @@ export function createApp() {
         try {
             const { sub } = await getStores(c.env);
             await sub.add(inboxId, entry);
+            // apns/fcm 每设备单 token：token 轮换会留下旧行，每条推送/自检都会发两遍。
+            // 注册成功后清掉同 inbox 同 channel 的旧订阅，只保留这条最新的。web 多端共存不清。
+            const ch = entry.channel || 'web';
+            if ((ch === 'apns' || ch === 'fcm') && typeof sub.pruneChannel === 'function') {
+                await sub.pruneChannel(inboxId, ch, subKey(entry));
+            }
         } catch (e) {
             // 把真实异常返回（而非裸 500），便于手机端「检查推送」直接显示后端报错（如 KV 未绑定 / put 失败）。
             return c.json({ error: 'subscribe failed', detail: String(e?.message || e), hasKV: !!(c.env && c.env.OUTBOX) }, 500);

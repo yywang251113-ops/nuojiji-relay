@@ -38,6 +38,24 @@ class KvSubStore {
     async remove(inboxId, subscription) {
         await this.kv.delete(`s:${inboxId}:${subKey(subscription)}`);
     }
+    // 清掉同 inbox 同 channel 下、key 不等于 keepKey 的旧订阅。
+    // apns/fcm 是「每设备单 token」语义：token 轮换（重装/系统更新/恢复备份）会注册出新 key，
+    // 旧 token 行在 60 天 TTL 内仍残留 → 每条推送/自检都发两遍。注册新 token 时顺手清旧的。
+    async pruneChannel(inboxId, channel, keepKey) {
+        let cursor;
+        do {
+            const res = await this.kv.list({ prefix: `s:${inboxId}:`, cursor });
+            for (const k of res.keys) {
+                if (k.name === `s:${inboxId}:${keepKey}`) continue;
+                const raw = await this.kv.get(k.name);
+                if (!raw) continue;
+                let parsed; try { parsed = JSON.parse(raw); } catch { continue; }
+                const ch = parsed?.channel || parsed?.sub?.channel || 'web';
+                if (ch === channel) await this.kv.delete(k.name);
+            }
+            cursor = res.list_complete ? null : res.cursor;
+        } while (cursor);
+    }
 }
 
 class MemorySubStore {
@@ -54,10 +72,19 @@ class MemorySubStore {
         const m = this.byInbox.get(inboxId);
         if (m) m.delete(subKey(subscription));
     }
+    async pruneChannel(inboxId, channel, keepKey) {
+        const m = this.byInbox.get(inboxId);
+        if (!m) return;
+        for (const [key, parsed] of [...m.entries()]) {
+            if (key === keepKey) continue;
+            const ch = parsed?.channel || parsed?.sub?.channel || 'web';
+            if (ch === channel) m.delete(key);
+        }
+    }
 }
 
 // 订阅去重键：web 用 endpoint，apns/fcm 用 token
-function subKey(subscription) {
+export function subKey(subscription) {
     const s = subscription?.sub || subscription;
     return s?.endpoint || subscription?.token || subscription?.channel || 'default';
 }
