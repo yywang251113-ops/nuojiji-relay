@@ -202,4 +202,4 @@ docker run -d -p 8787:8787 \
 
 - **Phase 1（已完成）**：服务端跑完手机发起的回复 + outbox 拉取 + Web Push/轮询。
 - **Phase 2（已完成）**：后端 cron 定时主动生成（角色主动找你，App 关闭也能用），提示词不进仓库。
-- **后续**：iOS APNs / Android FCM 原生推送（`src/push/apns.js` `fcm.js` 已留 stub），让 App 被杀时也能弹推送（当前靠轮询兜底）。
+- **后续**：iOS APNs / Android FCM 原生推送（`src/push/apns.js` `fcm.js` 已留 stub），让 App 被杀时也能弹推送（当前靠轮询兜底）。 
